@@ -81,7 +81,15 @@ pub fn content(p: &Project) -> ProjectDoc {
 }
 
 fn dialog() -> FileDialog {
-    FileDialog::new().add_filter(tr("Pro Wave Project"), &[prowave_project::EXTENSION])
+    FileDialog::new().add_filter(
+        tr("Pro Wave Project"),
+        &[
+            prowave_project::EXTENSION,
+            prowave_project::LOGICX_EXTENSION,
+            prowave_project::FCPXML_EXTENSION,
+            "plist",
+        ],
+    )
 }
 
 /// The answer to the "save changes?" prompt.

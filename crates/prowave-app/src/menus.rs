@@ -72,10 +72,23 @@ const SUBMENUS: &[(&str, &[&str])] = &[
         ],
     ),
     ("Movie", &["Open Movie…", "Remove Movie"]),
-    ("Import", &["Audio File…", "MIDI File…", "Other Projects…"]),
+    (
+        "Import",
+        &[
+            "Audio File…",
+            "MIDI File…",
+            "Logic Pro Project (.logicx)…",
+            "Final Cut Pro XML (.fcpxml)…",
+            "Other Projects…",
+        ],
+    ),
     (
         "Export",
         &[
+            "Platform Export…",
+            "Export as Logic Pro (.logicx)…",
+            "Export as Final Cut Pro XML (.fcpxml)…",
+            "Export All Tracks as BWF Stems…",
             "Selection as MIDI File…",
             "Track as Audio File…",
             "All Tracks as Audio Files…",
@@ -492,6 +505,12 @@ pub(crate) fn enabled(label: &str, p: &Project, s: &crate::UiState) -> bool {
         | "MIDI File…"
         | "MIDI FX…"
         | "Selection as MIDI File…"
+        | "Platform Export…"
+        | "Export as Logic Pro (.logicx)…"
+        | "Export as Final Cut Pro XML (.fcpxml)…"
+        | "Export All Tracks as BWF Stems…"
+        | "Logic Pro Project (.logicx)…"
+        | "Final Cut Pro XML (.fcpxml)…"
         | "Create Marker"
         | "Mixer"
         | "Piano Roll"
@@ -614,6 +633,27 @@ pub(crate) fn apply(label: &str, p: &mut Project, s: &mut crate::UiState) {
         "MIDI FX…" => s.show_midi_fx = !s.show_midi_fx,
         "MIDI File…" => s.midi_cmd = Some(crate::midi_file::MidiCmd::Import),
         "Selection as MIDI File…" => s.midi_cmd = Some(crate::midi_file::MidiCmd::Export),
+        "Platform Export…" => {
+            s.platform_export.open_dialog(None, &p.name);
+        }
+        "Export as Logic Pro (.logicx)…" => {
+            s.platform_export.format = prowave_project::PlatformExportFormat::LogicProX;
+            s.platform_export.open_dialog(None, &p.name);
+        }
+        "Export as Final Cut Pro XML (.fcpxml)…" => {
+            s.platform_export.format = prowave_project::PlatformExportFormat::FinalCutProXml;
+            s.platform_export.open_dialog(None, &p.name);
+        }
+        "Export All Tracks as BWF Stems…" => {
+            s.platform_export.format = prowave_project::PlatformExportFormat::BwfStemsConsolidated;
+            s.platform_export.open_dialog(None, &p.name);
+        }
+        "Logic Pro Project (.logicx)…" => {
+            s.platform_import_cmd = Some(crate::platform_export_ui::PlatformImportCmd::LogicProX);
+        }
+        "Final Cut Pro XML (.fcpxml)…" => {
+            s.platform_import_cmd = Some(crate::platform_export_ui::PlatformImportCmd::FinalCutProXml);
+        }
         "New Pattern Region" | "New Drummer Region" => {
             // On the selected track, at the bar the playhead is in.
             let bar = p.beats_to_bar(p.position_beats).floor() as f32 + 1.0;
@@ -1030,7 +1070,14 @@ mod tests {
                     s.browser.open
                 ),
                 s.bottom == Bottom::Mixer,
-                (s.file_cmd, s.chooser.is_some(), s.undo_cmd, s.midi_cmd),
+                (
+                    s.file_cmd,
+                    s.chooser.is_some(),
+                    s.undo_cmd,
+                    s.midi_cmd,
+                    s.platform_export.open,
+                    s.platform_import_cmd,
+                ),
                 (s.ui_scale, s.tracks.bar_w, s.tracks.selected),
                 (
                     s.tracks.show_tempo,

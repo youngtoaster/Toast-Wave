@@ -3,6 +3,25 @@
 What changed in each Pro Wave release. The release workflow copies the section of the version
 being released into the GitHub Release notes, so keep one `## <version>` heading per release.
 
+## 0.3.0
+
+### All systems (Windows, macOS, Linux)
+
+✅ **Apple Logic Pro X Ingestion & Bidirectional Compatibility:**
+- Open old Logic Pro X project saves (`.logicx`), supporting both Package Mode bundles and Folder Mode layouts.
+- Ingestion pipeline decodes `ProjectInformation.plist`, `MetaData.plist`, and `DisplayState.plist`.
+- Reads 64-bit Broadcast Wave Format (BWF) `bext` timestamps (`TimeReference`), accurately positioning audio clips to project sample offsets and bars/beats.
+- Scans `ProjectData` binary for track and region names, stock plug-ins (Channel EQ, Compressor, Space Designer, PlatinumVerb), and Session Player / Drummer metadata.
+- Save as `.logicx`: directly exports native Logic Pro X packages with plists and BWF audio.
+
+✅ **Cross-Platform DAW Interchange:**
+- **Platform Export Modal Dialog (File > Export > Platform Export…):** 1-click batch export targeting any major DAW.
+- **Final Cut Pro XML (`.fcpxml`):** Full sequence timeline export & import compatible with Apple Logic Pro, Final Cut Pro, DaVinci Resolve, and Adobe Premiere.
+- **Universal Multi-track BWF Stems (Consolidated):** Sample 0 (Bar 1 Beat 1) zero-aligned 24-bit BWF stems for seamless drag-and-drop import into Pro Tools, Ableton Live, FL Studio, Reaper, Cubase, and Studio One.
+- **Broadcast Wave Timestamped Stems:** Preserves region cut boundaries with embedded 64-bit `TimeReference` chunks for spot-to-timecode import.
+- **Standard MIDI Export (`.mid`):** Type 1 SMF multi-track MIDI export with project tempo map and time signature.
+- **Production Session Documentation:** Generates human-readable `SESSION_INFO.txt` and machine-readable `export_manifest.json` reports with faders, pans, plugins, markers, and import guides.
+
 ## 0.2.1
 
 ### All systems (Windows, macOS, Linux)

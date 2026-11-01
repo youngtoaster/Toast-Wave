@@ -331,7 +331,17 @@ pub(crate) mod tests {
     }
 
     /// Texts that are the same in every language and need no translation line.
-    const UNTRANSLATED: [&str; 3] = ["MIDI", "EQ", "Pro Wave"];
+    const UNTRANSLATED: [&str; 9] = [
+        "MIDI",
+        "EQ",
+        "Pro Wave",
+        "Logic Pro Project (.logicx)…",
+        "Final Cut Pro XML (.fcpxml)…",
+        "Platform Export…",
+        "Export as Logic Pro (.logicx)…",
+        "Export as Final Cut Pro XML (.fcpxml)…",
+        "Export All Tracks as BWF Stems…",
+    ];
 
     /// The Rust string literal starting at `s` (just after its opening quote), unescaped.
     fn literal(s: &str) -> Option<String> {

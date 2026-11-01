@@ -36,6 +36,7 @@ mod note_edit;
 mod patches;
 mod pattern;
 mod piano_roll;
+mod platform_export_ui;
 mod project_io;
 mod recent_files;
 mod recorder;
@@ -121,6 +122,10 @@ pub struct UiState {
     pub groove: groove::GrooveState,
     /// File > Import > MIDI File… or Export > Selection as MIDI File…, run after the menus.
     pub midi_cmd: Option<midi_file::MidiCmd>,
+    /// Platform export modal dialog state.
+    pub platform_export: platform_export_ui::PlatformExportDialog,
+    /// Platform import command queued by menus.
+    pub platform_import_cmd: Option<platform_export_ui::PlatformImportCmd>,
     /// The Pattern and Drummer editors, which take the Piano Roll's place for those regions.
     pub steps: step_editor::StepView,
     /// True while the pointer is over the Piano Roll (it owns Delete/Cmd+R then).
@@ -190,6 +195,8 @@ impl UiState {
             flex: flex_edit::FlexState::default(),
             groove: groove::GrooveState::default(),
             midi_cmd: None,
+            platform_export: platform_export_ui::PlatformExportDialog::new(),
+            platform_import_cmd: None,
             piano_focus: false,
             audition: Vec::new(),
             file_cmd: None,
@@ -288,7 +295,49 @@ impl App {
         }
     }
 
+    fn run_platform_import_cmd(
+        &mut self,
+        cmd: platform_export_ui::PlatformImportCmd,
+        ctx: &egui::Context,
+    ) {
+        match cmd {
+            platform_export_ui::PlatformImportCmd::LogicProX => {
+                let picked = rfd::FileDialog::new()
+                    .set_title("Import Apple Logic Pro X Project")
+                    .add_filter(
+                        "Logic Pro X Project",
+                        &[prowave_project::LOGICX_EXTENSION, "plist"],
+                    )
+                    .pick_file();
+                if let Some(path) = picked {
+                    self.open(&path, ctx);
+                }
+            }
+            platform_export_ui::PlatformImportCmd::FinalCutProXml => {
+                let picked = rfd::FileDialog::new()
+                    .set_title("Import Final Cut Pro XML")
+                    .add_filter(
+                        "Final Cut Pro XML",
+                        &[prowave_project::FCPXML_EXTENSION],
+                    )
+                    .pick_file();
+                if let Some(path) = picked {
+                    self.open(&path, ctx);
+                }
+            }
+        }
+    }
+
     fn import(&mut self, path: &std::path::Path, ctx: &egui::Context) {
+        if prowave_project::is_logicx_path(path)
+            || prowave_project::is_fcpxml_path(path)
+            || path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case(prowave_project::EXTENSION))
+        {
+            self.open(path, ctx);
+            return;
+        }
         if midi_file::is_midi_path(path) {
             self.ui.status = Some(match midi_file::import_path(&mut self.project, path) {
                 Ok(n) => i18n::trf("imported {} tracks from {}", &[&n, &path.display()]),
@@ -709,6 +758,10 @@ impl eframe::App for App {
         if let Some(cmd) = self.ui.midi_cmd.take() {
             self.run_midi_cmd(cmd);
         }
+        if let Some(cmd) = self.ui.platform_import_cmd.take() {
+            self.run_platform_import_cmd(cmd, &ctx);
+        }
+        self.ui.platform_export.show(&ctx, &self.project);
         midi_fx_ui::show(&ctx, &mut self.project, &mut self.ui);
         transform_ui::show(&ctx, &mut self.project, &mut self.ui);
         smart_tempo::show(&ctx, &mut self.project, &mut self.ui);
@@ -1189,9 +1242,13 @@ fn main() -> eframe::Result {
                 std::env::args_os().skip(1).collect()
             };
             let is_project = |a: &std::ffi::OsString| {
-                std::path::Path::new(a)
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case(prowave_project::EXTENSION))
+                let p = std::path::Path::new(a);
+                p.extension().is_some_and(|e| {
+                    e.eq_ignore_ascii_case(prowave_project::EXTENSION)
+                        || e.eq_ignore_ascii_case(prowave_project::LOGICX_EXTENSION)
+                        || e.eq_ignore_ascii_case(prowave_project::FCPXML_EXTENSION)
+                }) || prowave_project::is_logicx_path(p)
+                    || prowave_project::is_fcpxml_path(p)
             };
             if let Some(file) = args.iter().find(|a| is_project(a)) {
                 app.open(std::path::Path::new(file), &cc.egui_ctx);

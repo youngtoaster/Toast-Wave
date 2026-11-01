@@ -1059,10 +1059,18 @@ pub fn remove_stale_media(max_age: std::time::Duration) {
     }
 }
 
-/// Saves `p` to `path` (adds the `.prowave` extension if missing). Returns the final path.
+/// Saves `p` to `path` (keeps `.logicx` or `.fcpxml`, or defaults to `.prowave`). Returns the final path.
 pub fn save_project(p: &Project, path: &Path) -> Result<PathBuf, prowave_project::ProjectError> {
     let mut path = path.to_path_buf();
-    if path.extension().and_then(|e| e.to_str()) != Some(prowave_project::EXTENSION) {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext != prowave_project::EXTENSION
+        && ext != prowave_project::LOGICX_EXTENSION
+        && ext != prowave_project::FCPXML_EXTENSION
+    {
         path.set_extension(prowave_project::EXTENSION);
     }
     let (doc, media) = to_doc(p);

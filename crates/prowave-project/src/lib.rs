@@ -22,10 +22,37 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const PROJECT_JSON: &str = "project.json";
 pub const MEDIA_DIR: &str = "media/";
 pub const EXTENSION: &str = "prowave";
+pub const LOGICX_EXTENSION: &str = "logicx";
+pub const FCPXML_EXTENSION: &str = "fcpxml";
 /// Largest `project.json` accepted when loading (guards against zip bombs).
 pub const MAX_JSON_BYTES: u64 = 64 << 20;
 /// Most media data extracted from one project (guards against zip bombs filling the disk).
 pub const MAX_MEDIA_BYTES: u64 = 16 << 30;
+
+pub mod bwf;
+pub mod logicx;
+pub mod fcpxml;
+pub mod stems;
+pub mod platform_export;
+
+pub use platform_export::{export_project_for_platform, PlatformExportFormat};
+pub use stems::{export_bwf_stems, ExportManifest, StemExportMode};
+
+/// True if `path` has a `.logicx` extension or points to a Logic Pro X package.
+pub fn is_logicx_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(LOGICX_EXTENSION))
+        || path.to_string_lossy().to_ascii_lowercase().ends_with(".logicx")
+}
+
+/// True if `path` has a `.fcpxml` extension.
+pub fn is_fcpxml_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(FCPXML_EXTENSION))
+        || path.to_string_lossy().to_ascii_lowercase().ends_with(".fcpxml")
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TrackKindDoc {
@@ -578,9 +605,16 @@ pub fn media_path(index: usize, source: &Path) -> String {
     format!("{MEDIA_DIR}{index}_{clean}")
 }
 
-/// Writes the project to `path`. The archive is written next to it first and then renamed, so
-/// a failed save never destroys the previous file.
+/// Writes the project to `path`. If `path` is a `.logicx` file/bundle or `.fcpxml`,
+/// it dispatches to the corresponding platform engine. Otherwise, it writes a `.prowave`
+/// zip archive atomically via a temporary file.
 pub fn save(path: &Path, doc: &ProjectDoc, media: &[MediaFile]) -> Result<(), ProjectError> {
+    if is_logicx_path(path) {
+        return logicx::save_logicx(path, doc, media);
+    }
+    if is_fcpxml_path(path) {
+        return fcpxml::export_fcpxml(path, doc, media);
+    }
     let tmp = path.with_extension(format!("{EXTENSION}.tmp"));
     let written = write_archive(&tmp, doc, media);
     if written.is_err() {
@@ -619,10 +653,18 @@ fn write_archive(tmp: &Path, doc: &ProjectDoc, media: &[MediaFile]) -> Result<()
     Ok(())
 }
 
-/// Reads `path`. Media files are extracted into `media_dir` (keeping their `media/…` names);
-/// the returned document's audio paths stay archive-relative, so resolve them with
-/// `media_dir.join(path)`. Entries outside `media/` or escaping the folder are ignored.
+/// Reads `path`. If `path` is a Logic Pro X package (`.logicx`) or Final Cut Pro XML (`.fcpxml`),
+/// it routes to the dedicated platform loader. Otherwise, media files are extracted into
+/// `media_dir` (keeping their `media/…` names); the returned document's audio paths stay
+/// archive-relative, so resolve them with `media_dir.join(path)`. Entries outside `media/`
+/// or escaping the folder are ignored.
 pub fn load(path: &Path, media_dir: &Path) -> Result<ProjectDoc, ProjectError> {
+    if is_logicx_path(path) || logicx::find_logicx_bundle(path).is_ok() {
+        return logicx::load_logicx(path, media_dir);
+    }
+    if is_fcpxml_path(path) {
+        return fcpxml::load_fcpxml(path, media_dir);
+    }
     load_with_limits(path, media_dir, MAX_JSON_BYTES, MAX_MEDIA_BYTES)
 }
 
