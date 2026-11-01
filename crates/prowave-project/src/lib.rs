@@ -40,10 +40,22 @@ pub use stems::{export_bwf_stems, ExportManifest, StemExportMode};
 
 /// True if `path` has a `.logicx` extension or points to a Logic Pro X package.
 pub fn is_logicx_path(path: &Path) -> bool {
-    path.extension()
+    if path
+        .extension()
         .and_then(|s| s.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case(LOGICX_EXTENSION))
         || path.to_string_lossy().to_ascii_lowercase().ends_with(".logicx")
+    {
+        return true;
+    }
+    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+        if name == ".musicapps-project-folder"
+            || (name.starts_with("._") && name.to_ascii_lowercase().ends_with(".logicx"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// True if `path` has a `.fcpxml` extension.

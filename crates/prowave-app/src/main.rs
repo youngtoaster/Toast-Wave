@@ -331,6 +331,7 @@ impl App {
     fn import(&mut self, path: &std::path::Path, ctx: &egui::Context) {
         if prowave_project::is_logicx_path(path)
             || prowave_project::is_fcpxml_path(path)
+            || prowave_project::logicx::find_logicx_bundle(path).is_ok()
             || path
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case(prowave_project::EXTENSION))

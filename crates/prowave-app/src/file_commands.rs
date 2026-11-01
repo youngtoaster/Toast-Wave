@@ -81,15 +81,17 @@ pub fn content(p: &Project) -> ProjectDoc {
 }
 
 fn dialog() -> FileDialog {
-    FileDialog::new().add_filter(
-        tr("Pro Wave Project"),
-        &[
-            prowave_project::EXTENSION,
-            prowave_project::LOGICX_EXTENSION,
-            prowave_project::FCPXML_EXTENSION,
-            "plist",
-        ],
-    )
+    FileDialog::new()
+        .add_filter(
+            tr("Pro Wave Project"),
+            &[
+                prowave_project::EXTENSION,
+                prowave_project::LOGICX_EXTENSION,
+                prowave_project::FCPXML_EXTENSION,
+                "plist",
+            ],
+        )
+        .add_filter("All Files (*.*)", &["*"])
 }
 
 /// The answer to the "save changes?" prompt.
@@ -259,10 +261,12 @@ impl App {
 
     /// Opens `path`, replacing the current project (no prompt; callers ask first).
     pub fn open(&mut self, path: &Path, ctx: &egui::Context) {
-        match project_io::open_project(path, ctx) {
+        let target_path = prowave_project::logicx::find_logicx_bundle(path)
+            .unwrap_or_else(|_| path.to_path_buf());
+        match project_io::open_project(&target_path, ctx) {
             Ok((p, warnings)) => {
-                self.replace(p, Some(path.to_path_buf()));
-                self.ui.recent.add(path);
+                self.replace(p, Some(target_path.clone()));
+                self.ui.recent.add(&target_path);
                 if !warnings.is_empty() {
                     self.ui.status = Some(trf("missing media: {}", &[&warnings.join(", ")]));
                 }

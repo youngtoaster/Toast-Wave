@@ -1087,7 +1087,8 @@ pub fn open_project(
     let doc = prowave_project::load(path, &media_dir)?;
     let (mut p, warnings) = from_doc(&doc, &media_dir, ctx);
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-        p.name = stem.to_string();
+        let clean_name = stem.strip_prefix("._").unwrap_or(stem);
+        p.name = clean_name.to_string();
     }
     Ok((p, warnings))
 }

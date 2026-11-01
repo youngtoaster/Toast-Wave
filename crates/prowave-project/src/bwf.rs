@@ -27,7 +27,7 @@ pub struct BwfInfo {
     pub originator: String,
 }
 
-/// Reads BWF metadata from a WAV file.
+/// Reads BWF/WAV or AIFF metadata from an audio file.
 pub fn read_bwf_info(path: &Path) -> Result<BwfInfo, String> {
     let file = File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     let mut reader = BufReader::new(file);
@@ -37,10 +37,27 @@ pub fn read_bwf_info(path: &Path) -> Result<BwfInfo, String> {
         .read_exact(&mut header)
         .map_err(|e| format!("failed to read header: {e}"))?;
 
-    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
-        return Err("not a RIFF/WAVE file".to_string());
+    if &header[0..4] == b"RIFF" && &header[8..12] == b"WAVE" {
+        return read_riff_wave_info(&mut reader);
+    }
+    if &header[0..4] == b"FORM" && (&header[8..12] == b"AIFF" || &header[8..12] == b"AIFC") {
+        return read_aiff_info(&mut reader);
     }
 
+    Err("not a supported audio format (RIFF/WAVE or FORM/AIFF)".to_string())
+}
+
+/// Parses standard IEEE 754 80-bit extended precision float (big-endian).
+pub fn parse_f80_be(bytes: &[u8; 10]) -> f64 {
+    let exp = (((bytes[0] as i32) & 0x7F) << 8) | (bytes[1] as i32);
+    let mantissa = u64::from_be_bytes(bytes[2..10].try_into().unwrap_or([0; 8]));
+    if exp == 0 && mantissa == 0 {
+        return 0.0;
+    }
+    mantissa as f64 * 2.0f64.powi(exp - 16383 - 63)
+}
+
+fn read_riff_wave_info<R: Read + Seek>(reader: &mut R) -> Result<BwfInfo, String> {
     let mut sample_rate: Option<u32> = None;
     let mut channels: Option<u16> = None;
     let mut bits_per_sample: Option<u16> = None;
@@ -144,6 +161,181 @@ pub fn read_bwf_info(path: &Path) -> Result<BwfInfo, String> {
         }
 
         // RIFF chunks are 2-byte aligned
+        if chunk_size % 2 != 0 {
+            let _ = reader.seek(SeekFrom::Current(1));
+        }
+    }
+
+    let sr = sample_rate.unwrap_or(44100);
+    let dur = if sr > 0 {
+        total_samples as f64 / sr as f64
+    } else {
+        0.0
+    };
+    let start_sec = time_reference.map(|tr| tr as f64 / sr as f64);
+
+    Ok(BwfInfo {
+        sample_rate: sr,
+        channels: channels.unwrap_or(2),
+        bits_per_sample: bits_per_sample.unwrap_or(16),
+        time_reference,
+        total_samples,
+        duration_seconds: dur,
+        start_seconds: start_sec,
+        description,
+        originator,
+    })
+}
+
+fn read_aiff_info<R: Read + Seek>(reader: &mut R) -> Result<BwfInfo, String> {
+    let mut sample_rate: Option<u32> = None;
+    let mut channels: Option<u16> = None;
+    let mut bits_per_sample: Option<u16> = None;
+    let mut time_reference: Option<u64> = None;
+    let mut total_samples: u64 = 0;
+    let mut description = String::new();
+    let mut originator = String::new();
+
+    let mut chunk_hdr = [0u8; 8];
+    while reader.read_exact(&mut chunk_hdr).is_ok() {
+        let chunk_id = &chunk_hdr[0..4];
+        let chunk_size = u32::from_be_bytes([
+            chunk_hdr[4],
+            chunk_hdr[5],
+            chunk_hdr[6],
+            chunk_hdr[7],
+        ]) as u64;
+
+        match chunk_id {
+            b"COMM" => {
+                let to_read = (chunk_size as usize).min(32);
+                let mut comm_buf = vec![0u8; to_read];
+                reader
+                    .read_exact(&mut comm_buf)
+                    .map_err(|e| format!("failed reading COMM chunk: {e}"))?;
+
+                if comm_buf.len() >= 18 {
+                    channels = Some(u16::from_be_bytes([comm_buf[0], comm_buf[1]]));
+                    total_samples = u32::from_be_bytes([
+                        comm_buf[2], comm_buf[3], comm_buf[4], comm_buf[5],
+                    ]) as u64;
+                    bits_per_sample = Some(u16::from_be_bytes([comm_buf[6], comm_buf[7]]));
+                    let mut f80_bytes = [0u8; 10];
+                    f80_bytes.copy_from_slice(&comm_buf[8..18]);
+                    let sr = parse_f80_be(&f80_bytes);
+                    if sr > 0.0 && sr < 1_000_000.0 {
+                        sample_rate = Some(sr.round() as u32);
+                    }
+                }
+
+                if chunk_size > to_read as u64 {
+                    reader
+                        .seek(SeekFrom::Current((chunk_size - to_read as u64) as i64))
+                        .map_err(|e| format!("seek error: {e}"))?;
+                }
+            }
+            b"MARK" | b"ARK\0" => {
+                let to_read = (chunk_size as usize).min(65536);
+                let mut buf = vec![0u8; to_read];
+                reader
+                    .read_exact(&mut buf)
+                    .map_err(|e| format!("failed reading marker chunk: {e}"))?;
+
+                // Search for "Timestamp: <number>"
+                if let Some(pos) = buf.windows(11).position(|w| w == b"Timestamp: ") {
+                    let rest = &buf[pos + 11..];
+                    let end = rest
+                        .iter()
+                        .position(|&b| b == 0 || b == b'\r' || b == b'\n')
+                        .unwrap_or(rest.len());
+                    if let Ok(s) = std::str::from_utf8(&rest[..end]) {
+                        if let Ok(ts) = s.trim().parse::<u64>() {
+                            let sr = sample_rate.unwrap_or(44100) as u64;
+                            let one_hr = 3600u64 * sr;
+                            let song_samples = if ts >= one_hr {
+                                ts - one_hr
+                            } else {
+                                ts
+                            };
+                            time_reference = Some(song_samples);
+                        }
+                    }
+                }
+
+                if chunk_size > to_read as u64 {
+                    reader
+                        .seek(SeekFrom::Current((chunk_size - to_read as u64) as i64))
+                        .map_err(|e| format!("seek error: {e}"))?;
+                }
+            }
+            b"COMT" => {
+                let to_read = (chunk_size as usize).min(512);
+                let mut buf = vec![0u8; to_read];
+                reader
+                    .read_exact(&mut buf)
+                    .map_err(|e| format!("failed reading comment chunk: {e}"))?;
+                let comm_str = String::from_utf8_lossy(&buf);
+                if let Some(pos) = comm_str.find("Creator:") {
+                    originator = comm_str[pos..].trim().to_string();
+                } else {
+                    originator = comm_str.trim().to_string();
+                }
+
+                if chunk_size > to_read as u64 {
+                    reader
+                        .seek(SeekFrom::Current((chunk_size - to_read as u64) as i64))
+                        .map_err(|e| format!("seek error: {e}"))?;
+                }
+            }
+            b"bext" => {
+                let to_read = chunk_size.min(1024) as usize;
+                let mut bext_buf = vec![0u8; to_read];
+                reader
+                    .read_exact(&mut bext_buf)
+                    .map_err(|e| format!("failed reading bext chunk: {e}"))?;
+
+                if bext_buf.len() >= 256 {
+                    description = String::from_utf8_lossy(&bext_buf[0..256])
+                        .trim_matches('\0')
+                        .trim()
+                        .to_string();
+                }
+                if bext_buf.len() >= 288 {
+                    originator = String::from_utf8_lossy(&bext_buf[256..288])
+                        .trim_matches('\0')
+                        .trim()
+                        .to_string();
+                }
+                if bext_buf.len() >= 346 {
+                    let low = u32::from_le_bytes([
+                        bext_buf[338],
+                        bext_buf[339],
+                        bext_buf[340],
+                        bext_buf[341],
+                    ]) as u64;
+                    let high = u32::from_le_bytes([
+                        bext_buf[342],
+                        bext_buf[343],
+                        bext_buf[344],
+                        bext_buf[345],
+                    ]) as u64;
+                    time_reference = Some((high << 32) | low);
+                }
+
+                if chunk_size > to_read as u64 {
+                    reader
+                        .seek(SeekFrom::Current((chunk_size - to_read as u64) as i64))
+                        .map_err(|e| format!("seek error: {e}"))?;
+                }
+            }
+            _ => {
+                reader
+                    .seek(SeekFrom::Current(chunk_size as i64))
+                    .map_err(|e| format!("seek error: {e}"))?;
+            }
+        }
+
+        // AIFF chunks are 2-byte aligned
         if chunk_size % 2 != 0 {
             let _ = reader.seek(SeekFrom::Current(1));
         }
@@ -597,5 +789,19 @@ mod tests {
         assert_eq!(read_sr, 48000);
         assert_eq!(read_ch, 2);
         assert_eq!(read_samples.len(), samples.len());
+    }
+
+    #[test]
+    fn parse_f80_be_rates() {
+        // 44100.0: exp 0x400E, mantissa 0xAC44000000000000
+        let r44100 = [0x40, 0x0E, 0xAC, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(parse_f80_be(&r44100).round() as u32, 44100);
+
+        // 48000.0: exp 0x400E, mantissa 0xBB80000000000000
+        let r48000 = [0x40, 0x0E, 0xBB, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(parse_f80_be(&r48000).round() as u32, 48000);
+
+        // Zero
+        assert_eq!(parse_f80_be(&[0u8; 10]), 0.0);
     }
 }

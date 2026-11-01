@@ -49,15 +49,58 @@ pub const STOCK_PLUGINS: &[&str] = &[
     "EnRoute",
 ];
 
-/// Locates the real `.logicx` bundle directory given a path (handles both package and folder mode).
+/// Helper to determine if a directory is a valid Logic Pro X project bundle.
+pub fn is_bundle_dir(p: &Path) -> bool {
+    if !p.is_dir() {
+        return false;
+    }
+    p.join("Alternatives").exists()
+        || p.join("ProjectInformation.plist").exists()
+        || p.join("Resources").join("ProjectInformation.plist").exists()
+        || p.join("Alternatives").join("000").join("ProjectData").exists()
+}
+
+/// Locates the real `.logicx` bundle directory given a path (handles both package and folder mode,
+/// AppleDouble sidecar files, and nested project directories).
 pub fn find_logicx_bundle(path: &Path) -> Result<PathBuf, String> {
     if !path.exists() {
         return Err(format!("path does not exist: {}", path.display()));
     }
 
-    // Direct bundle directory: e.g. "Song.logicx"
+    // 1. macOS AppleDouble sidecar file handling: e.g. "._DEJA VU-UNAPOLOGETIC.logicx"
+    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+        if let Some(clean) = name.strip_prefix("._") {
+            if let Some(parent) = path.parent() {
+                let sibling = parent.join(clean);
+                if sibling.exists() {
+                    return find_logicx_bundle(&sibling);
+                }
+            }
+        }
+    }
+
+    // 2. If path is a file inside or next to a bundle (e.g. .musicapps-project-folder, ProjectInformation.plist)
+    if path.is_file() {
+        // If it's a marker file like .musicapps-project-folder, search its parent directory
+        if let Some(parent) = path.parent() {
+            if let Ok(bundle) = find_logicx_bundle(parent) {
+                return Ok(bundle);
+            }
+        }
+
+        // Walk up ancestor directories: user might have picked a file inside the bundle
+        let mut curr = path.parent();
+        while let Some(dir) = curr {
+            if is_bundle_dir(dir) {
+                return Ok(dir.to_path_buf());
+            }
+            curr = dir.parent();
+        }
+    }
+
+    // 3. Direct bundle directory: e.g. "Song.logicx"
     if path.is_dir() {
-        if path.join("Alternatives").exists() || path.join("ProjectInformation.plist").exists() {
+        if is_bundle_dir(path) {
             return Ok(path.to_path_buf());
         }
 
@@ -65,11 +108,37 @@ pub fn find_logicx_bundle(path: &Path) -> Result<PathBuf, String> {
         if let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
                 let p = entry.path();
+                // Skip AppleDouble files
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    if name.starts_with("._") {
+                        continue;
+                    }
+                }
+                if is_bundle_dir(&p) {
+                    return Ok(p);
+                }
                 if p.is_dir()
                     && p.extension().and_then(|e| e.to_str()) == Some("logicx")
-                    && (p.join("Alternatives").exists() || p.join("ProjectInformation.plist").exists())
+                    && is_bundle_dir(&p)
                 {
                     return Ok(p);
+                }
+            }
+        }
+
+        // Check if user pointed to a subfolder (like Audio Files/ or Freeze Files/) whose parent is folder mode
+        if let Some(parent) = path.parent() {
+            if let Ok(entries) = fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                        if name.starts_with("._") {
+                            continue;
+                        }
+                    }
+                    if is_bundle_dir(&p) {
+                        return Ok(p);
+                    }
                 }
             }
         }
@@ -90,6 +159,8 @@ pub struct LogicxMetadata {
     pub time_signature: (u8, u8),
     pub key_signature: String,
     pub sample_rate: u32,
+    pub active_audio_files: Vec<String>,
+    pub unused_audio_files: Vec<String>,
 }
 
 impl Default for LogicxMetadata {
@@ -101,6 +172,8 @@ impl Default for LogicxMetadata {
             time_signature: (4, 4),
             key_signature: "Cmaj".into(),
             sample_rate: 44100,
+            active_audio_files: Vec::new(),
+            unused_audio_files: Vec::new(),
         }
     }
 }
@@ -108,19 +181,33 @@ impl Default for LogicxMetadata {
 pub fn read_bundle_metadata(bundle_path: &Path) -> LogicxMetadata {
     let mut meta = LogicxMetadata::default();
 
-    // 1. ProjectInformation.plist
-    let info_plist_path = bundle_path.join("ProjectInformation.plist");
-    if let Ok(val) = Value::from_file(&info_plist_path) {
-        if let Some(dict) = val.as_dictionary() {
-            if let Some(alt) = dict.get("activeAlternative") {
-                if let Some(num) = alt.as_unsigned_integer() {
-                    meta.active_alternative = format!("{:03}", num);
-                } else if let Some(s) = alt.as_string() {
-                    meta.active_alternative = s.to_string();
+    // 1. ProjectInformation.plist (in root or in Resources/)
+    let info_candidates = [
+        bundle_path.join("ProjectInformation.plist"),
+        bundle_path.join("Resources").join("ProjectInformation.plist"),
+    ];
+    for info_path in &info_candidates {
+        if let Ok(val) = Value::from_file(info_path) {
+            if let Some(dict) = val.as_dictionary() {
+                if let Some(alt) = dict.get("activeAlternative") {
+                    if let Some(num) = alt.as_unsigned_integer() {
+                        meta.active_alternative = format!("{:03}", num);
+                    } else if let Some(s) = alt.as_string() {
+                        meta.active_alternative = s.to_string();
+                    }
+                } else if let Some(variants) = dict.get("VariantNames").and_then(|v| v.as_dictionary()) {
+                    if let Some(first_key) = variants.keys().next() {
+                        if let Ok(num) = first_key.parse::<u32>() {
+                            meta.active_alternative = format!("{:03}", num);
+                        }
+                    }
                 }
-            }
-            if let Some(ver) = dict.get("logicVersion").and_then(|v| v.as_string()) {
-                meta.logic_version = ver.to_string();
+                if let Some(ver) = dict.get("logicVersion").and_then(|v| v.as_string()) {
+                    meta.logic_version = ver.to_string();
+                } else if let Some(saved) = dict.get("LastSavedFrom").and_then(|v| v.as_string()) {
+                    meta.logic_version = saved.to_string();
+                }
+                break;
             }
         }
     }
@@ -129,11 +216,15 @@ pub fn read_bundle_metadata(bundle_path: &Path) -> LogicxMetadata {
     let alt_dir = bundle_path
         .join("Alternatives")
         .join(&meta.active_alternative);
-    let meta_plist_path = alt_dir.join("MetaData.plist");
-    let display_plist_path = alt_dir.join("DisplayState.plist");
+    let meta_candidates = [
+        alt_dir.join("MetaData.plist"),
+        bundle_path.join("Alternatives").join("000").join("MetaData.plist"),
+        alt_dir.join("DisplayState.plist"),
+    ];
 
     let parse_dict = |dict: &plist::Dictionary, meta: &mut LogicxMetadata| {
-        if let Some(t) = dict.get("tempo") {
+        // Tempo: BeatsPerMinute or tempo
+        if let Some(t) = dict.get("BeatsPerMinute").or_else(|| dict.get("tempo")) {
             if let Some(f) = t.as_real() {
                 if f > 20.0 && f < 999.0 {
                     meta.tempo = f as f32;
@@ -144,17 +235,40 @@ pub fn read_bundle_metadata(bundle_path: &Path) -> LogicxMetadata {
                 }
             }
         }
+        // Key signature: SongKey + SongGenderKey or keySignature
         if let Some(k) = dict.get("keySignature").and_then(|v| v.as_string()) {
             meta.key_signature = k.to_string();
+        } else if let Some(song_key) = dict.get("SongKey").and_then(|v| v.as_string()) {
+            let gender = dict
+                .get("SongGenderKey")
+                .and_then(|v| v.as_string())
+                .unwrap_or("major");
+            let suffix = if gender.to_ascii_lowercase().contains("min") {
+                "min"
+            } else {
+                "maj"
+            };
+            meta.key_signature = format!("{}{}", song_key, suffix);
         }
-        if let Some(sr) = dict.get("sampleRate") {
+        // Sample Rate: SampleRate or sampleRate
+        if let Some(sr) = dict.get("SampleRate").or_else(|| dict.get("sampleRate")) {
             if let Some(num) = sr.as_unsigned_integer() {
                 meta.sample_rate = num as u32;
             } else if let Some(f) = sr.as_real() {
                 meta.sample_rate = f as u32;
             }
         }
-        if let Some(ts) = dict.get("timeSignature") {
+        // Time Signature: SongSignatureNumerator / SongSignatureDenominator or timeSignature
+        if let (Some(num_val), Some(den_val)) = (
+            dict.get("SongSignatureNumerator"),
+            dict.get("SongSignatureDenominator"),
+        ) {
+            let num = num_val.as_unsigned_integer().unwrap_or(4) as u8;
+            let den = den_val.as_unsigned_integer().unwrap_or(4) as u8;
+            if num > 0 && den > 0 {
+                meta.time_signature = (num, den);
+            }
+        } else if let Some(ts) = dict.get("timeSignature") {
             if let Some(arr) = ts.as_array() {
                 if arr.len() >= 2 {
                     let num = arr[0].as_unsigned_integer().unwrap_or(4) as u8;
@@ -173,15 +287,30 @@ pub fn read_bundle_metadata(bundle_path: &Path) -> LogicxMetadata {
                 }
             }
         }
+        // AudioFiles (active in project)
+        if let Some(af) = dict.get("AudioFiles").and_then(|v| v.as_array()) {
+            for item in af {
+                if let Some(s) = item.as_string() {
+                    meta.active_audio_files.push(s.to_string());
+                }
+            }
+        }
+        // UnusedAudioFiles
+        if let Some(uf) = dict.get("UnusedAudioFiles").and_then(|v| v.as_array()) {
+            for item in uf {
+                if let Some(s) = item.as_string() {
+                    meta.unused_audio_files.push(s.to_string());
+                }
+            }
+        }
     };
 
-    if let Ok(val) = Value::from_file(&meta_plist_path) {
-        if let Some(dict) = val.as_dictionary() {
-            parse_dict(dict, &mut meta);
-        }
-    } else if let Ok(val) = Value::from_file(&display_plist_path) {
-        if let Some(dict) = val.as_dictionary() {
-            parse_dict(dict, &mut meta);
+    for meta_path in &meta_candidates {
+        if let Ok(val) = Value::from_file(meta_path) {
+            if let Some(dict) = val.as_dictionary() {
+                parse_dict(dict, &mut meta);
+                break;
+            }
         }
     }
 
@@ -199,7 +328,12 @@ pub struct ExtractedAudioRegion {
 }
 
 /// Scans all candidate audio directories within or adjacent to a Logic Pro bundle.
-pub fn scan_audio_files(bundle_path: &Path, alt: &str) -> Vec<PathBuf> {
+pub fn scan_audio_files(
+    bundle_path: &Path,
+    alt: &str,
+    active_filter: &[String],
+    unused_filter: &[String],
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     // 1. <bundle>/Audio Files
@@ -221,12 +355,35 @@ pub fn scan_audio_files(bundle_path: &Path, alt: &str) -> Vec<PathBuf> {
                 for entry in entries.flatten() {
                     let p = entry.path();
                     if p.is_file() {
+                        let file_name = match p.file_name().and_then(|s| s.to_str()) {
+                            Some(name) => name,
+                            None => continue,
+                        };
+
+                        // Skip AppleDouble and hidden files
+                        if file_name.starts_with('.') || file_name.starts_with("._") {
+                            continue;
+                        }
+
                         if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
                             let ext_lower = ext.to_ascii_lowercase();
                             if matches!(
                                 ext_lower.as_str(),
                                 "wav" | "wave" | "aif" | "aiff" | "caf" | "mp3" | "flac"
                             ) {
+                                // If active_filter is present, check if file is marked active or unused
+                                if !active_filter.is_empty() {
+                                    let is_active = active_filter.iter().any(|f| {
+                                        f.ends_with(file_name) || file_name.eq_ignore_ascii_case(f)
+                                    });
+                                    let is_unused = unused_filter.iter().any(|f| {
+                                        f.ends_with(file_name) || file_name.eq_ignore_ascii_case(f)
+                                    });
+                                    if !is_active && is_unused {
+                                        continue;
+                                    }
+                                }
+
                                 if !found.contains(&p) {
                                     found.push(p);
                                 }
@@ -243,11 +400,46 @@ pub fn scan_audio_files(bundle_path: &Path, alt: &str) -> Vec<PathBuf> {
 
 /// Cleans audio take/comp suffixes to deduce the track name.
 /// Examples:
+/// "DEJA VU-UNAPOLOGETIC_5#16_1" -> "Audio 5"
+/// "Deja Vu Instrumental_1" -> "Deja Vu Instrumental"
 /// "Vocal Lead: Take 01" -> "Vocal Lead"
 /// "Acoustic GTR_01" -> "Acoustic GTR"
 /// "Snare#04" -> "Snare"
 pub fn clean_track_name(name: &str) -> String {
     let mut s = name.trim().to_string();
+
+    // Strip trailing extension if any
+    if let Some((base, _)) = s.rsplit_once('.') {
+        if matches!(
+            s.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str(),
+            "aif" | "aiff" | "wav" | "wave" | "caf" | "mp3" | "flac"
+        ) {
+            s = base.trim().to_string();
+        }
+    }
+
+    // Strip trailing recording file counter suffixes like _1, _2
+    if let Some((base, rest)) = s.rsplit_once('_') {
+        if rest.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty() {
+            s = base.trim().to_string();
+        }
+    }
+
+    // Detect Logic take syntax: <base>_<track_num>#<take_num> e.g. "DEJA VU-UNAPOLOGETIC_5#16"
+    if let Some(hash_pos) = s.rfind('#') {
+        if let Some(under_pos) = s[..hash_pos].rfind('_') {
+            let track_str = &s[under_pos + 1..hash_pos];
+            if track_str.chars().all(|c| c.is_ascii_digit()) && !track_str.is_empty() {
+                let base = s[..under_pos].trim();
+                let track_num: u32 = track_str.parse().unwrap_or(1);
+                if base.is_empty() || base.eq_ignore_ascii_case("untitled") {
+                    return format!("Audio {}", track_num);
+                } else {
+                    return format!("{} Audio {}", base, track_num);
+                }
+            }
+        }
+    }
 
     // Iteratively strip known take/comp suffixes
     let mut changed = true;
@@ -382,11 +574,11 @@ pub fn load_logicx(path: &Path, media_dir: &Path) -> Result<ProjectDoc, ProjectE
 
     let meta = read_bundle_metadata(&bundle_path);
 
-    let song_name = bundle_path
+    let raw_name = bundle_path
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("Logic Project")
-        .to_string();
+        .unwrap_or("Logic Project");
+    let song_name = raw_name.strip_prefix("._").unwrap_or(raw_name).to_string();
 
     let mut doc = ProjectDoc {
         format_version: FORMAT_VERSION,
@@ -414,7 +606,12 @@ pub fn load_logicx(path: &Path, media_dir: &Path) -> Result<ProjectDoc, ProjectE
     };
 
     // Locate and extract audio files
-    let audio_files = scan_audio_files(&bundle_path, &meta.active_alternative);
+    let audio_files = scan_audio_files(
+        &bundle_path,
+        &meta.active_alternative,
+        &meta.active_audio_files,
+        &meta.unused_audio_files,
+    );
     fs::create_dir_all(media_dir).map_err(ProjectError::Io)?;
 
     let mut track_map: HashMap<String, Vec<RegionDoc>> = HashMap::new();
@@ -437,8 +634,8 @@ pub fn load_logicx(path: &Path, media_dir: &Path) -> Result<ProjectDoc, ProjectE
             .unwrap_or("")
             .to_ascii_lowercase();
 
-        // Decode BWF sample offset if WAV
-        if ext == "wav" || ext == "wave" {
+        // Decode BWF / AIFF sample offset and duration
+        if matches!(ext.as_str(), "wav" | "wave" | "aif" | "aiff") {
             if let Ok(bwf) = read_bwf_info(af) {
                 if let Some(start_sec) = bwf.start_seconds {
                     let start_beats = start_sec as f32 * (doc.tempo / 60.0);
@@ -836,5 +1033,111 @@ mod tests {
         assert_eq!(loaded.tempo, 128.0);
         assert_eq!(loaded.sig, (4, 4));
         assert_eq!(loaded.key, "F#min");
+    }
+
+    #[test]
+    fn appledouble_resolution_and_resources_plist() {
+        let dir = tempdir().unwrap();
+        let bundle_dir = dir.path().join("SummerVibes.logicx");
+        let res_dir = bundle_dir.join("Resources");
+        let alt_dir = bundle_dir.join("Alternatives").join("000");
+        fs::create_dir_all(&res_dir).unwrap();
+        fs::create_dir_all(&alt_dir).unwrap();
+
+        // Write ProjectInformation.plist in Resources/
+        let info_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>activeAlternative</key>
+    <string>000</string>
+    <key>LastSavedFrom</key>
+    <string>Logic Pro X 10.4.1</string>
+</dict>
+</plist>"#;
+        fs::write(res_dir.join("ProjectInformation.plist"), info_content).unwrap();
+
+        // Write MetaData.plist with BeatsPerMinute
+        let meta_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>BeatsPerMinute</key>
+    <real>105.0</real>
+    <key>SongSignatureNumerator</key>
+    <integer>3</integer>
+    <key>SongSignatureDenominator</key>
+    <integer>4</integer>
+    <key>SongKey</key>
+    <string>G</string>
+    <key>SongGenderKey</key>
+    <string>major</string>
+</dict>
+</plist>"#;
+        fs::write(alt_dir.join("MetaData.plist"), meta_content).unwrap();
+        fs::write(alt_dir.join("ProjectData"), b"dummy project data").unwrap();
+
+        // Create 4KB AppleDouble file next to the bundle
+        let apple_double = dir.path().join("._SummerVibes.logicx");
+        fs::write(&apple_double, vec![0u8; 4096]).unwrap();
+
+        // Test bundle resolution
+        let resolved = find_logicx_bundle(&apple_double).unwrap();
+        assert_eq!(resolved, bundle_dir);
+
+        // Test metadata reading
+        let meta = read_bundle_metadata(&resolved);
+        assert_eq!(meta.tempo, 105.0);
+        assert_eq!(meta.time_signature, (3, 4));
+        assert_eq!(meta.key_signature, "Gmaj");
+        assert_eq!(meta.logic_version, "Logic Pro X 10.4.1");
+
+        // Test loading
+        let media_dir = dir.path().join("media");
+        let doc = load_logicx(&apple_double, &media_dir).unwrap();
+        assert_eq!(doc.name, "SummerVibes");
+        assert_eq!(doc.tempo, 105.0);
+        assert_eq!(doc.sig, (3, 4));
+        assert_eq!(doc.key, "Gmaj");
+    }
+
+    #[test]
+    fn load_real_deja_vu_project_if_present() {
+        let real_path = Path::new(
+            r"C:\Users\Tysci\Downloads\Music\Music\Nick x Ty\DEJA VU-UNAPOLOGETIC\DEJA VU-UNAPOLOGETIC\._DEJA VU-UNAPOLOGETIC.logicx",
+        );
+        if !real_path.exists() {
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let media_dir = dir.path().join("media");
+
+        let doc = load_logicx(real_path, &media_dir).unwrap();
+        assert_eq!(doc.name, "DEJA VU-UNAPOLOGETIC");
+        assert_eq!(doc.tempo, 100.0);
+        assert_eq!(doc.sig, (4, 4));
+        assert_eq!(doc.key, "Cmaj");
+        assert!(!doc.tracks.is_empty(), "tracks should be populated");
+
+        let total_regions: usize = doc.tracks.iter().map(|t| t.regions.len()).sum();
+        assert!(total_regions >= 10, "should have loaded multiple audio regions");
+
+        // Verify instrumental track
+        let inst_track = doc
+            .tracks
+            .iter()
+            .find(|t| t.name.to_lowercase().contains("deja vu") || t.name.to_lowercase().contains("instrumental"));
+        assert!(inst_track.is_some(), "instrumental track should be found");
+        let inst = inst_track.unwrap();
+        assert_eq!(inst.regions[0].start_bar, 1.0, "instrumental should start at bar 1");
+        assert!(inst.regions[0].len_bars > 80.0, "instrumental duration should exceed 80 bars");
+
+        // Verify vocal track
+        let vocal_track = doc.tracks.iter().find(|t| t.name.contains("Audio 5"));
+        assert!(vocal_track.is_some(), "vocal Audio 5 track should be found");
+        let vocal = vocal_track.unwrap();
+        assert!(vocal.regions.len() >= 15, "vocal track should contain multiple takes");
+        assert!(vocal.regions.iter().any(|r| r.start_bar >= 20.0), "vocal takes should have timestamp offsets");
     }
 }

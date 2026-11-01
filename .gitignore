@@ -9,6 +9,8 @@
 /dist/*.flatpak
 /dist/*.zip
 /dist/deb/
+/dist/windows/*.exe
+*.exe
 
 # Signing material and local secrets (see AGENTS.md section 5)
 *.p12
